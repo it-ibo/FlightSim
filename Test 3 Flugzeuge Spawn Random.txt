@@ -1,0 +1,458 @@
+#include <windows.h>
+#include <tchar.h>
+#include <SimConnect.h>
+#include <iostream>
+#include <atomic>
+#include <vector>
+#include <cmath>
+#include <ctime>
+
+#ifndef M_PI
+#define _USE_MATH_DEFINES
+#include <math.h>
+#endif
+
+enum DataRequests {
+    REQUEST_USER_POSITION_B = 1000,
+    REQUEST_USER_POSITION_N,
+    REQUEST_USER_POSITION_C,
+    REQUEST_PERIODIC_POSITION,
+    REQUEST_UPDATE_AI_FLIGHT,
+    REQUEST_AI_POSITION
+};
+
+enum Definitions {
+    DEFINITION_POSITION,
+    DEFINITION_CONTROL,
+    DEFINITION_AI_POSITION
+};
+
+struct AircraftPosition {
+    double latitude;
+    double longitude;
+    double altitude;
+    double heading;
+};
+
+struct AircraftControl {
+    double heading;
+    double airspeed;
+};
+
+HANDLE hSimConnect = nullptr;
+std::atomic<int> spawnCount747(0);
+std::atomic<int> spawnCountSmall(0);
+std::vector<DWORD> aiObjectIDs;
+
+double g_UserHeading = 0.0;
+static double g_initialAIHeading = 0.0;
+
+void RequestSpawn747() {
+    HRESULT hr = SimConnect_RequestDataOnSimObject(
+        hSimConnect,
+        REQUEST_USER_POSITION_B,
+        DEFINITION_POSITION,
+        SIMCONNECT_OBJECT_ID_USER,
+        SIMCONNECT_PERIOD_ONCE,
+        0, 0, 0, 0
+    );
+
+    if (SUCCEEDED(hr)) {
+        std::cout << "Spawn-Anfrage fuer 747-8F gesendet." << std::endl;
+    }
+    else {
+        std::cerr << "Fehler beim Senden der Spawn-Anfrage fuer 747-8F." << std::endl;
+    }
+}
+
+void RequestSpawnSmall() {
+    HRESULT hr = SimConnect_RequestDataOnSimObject(
+        hSimConnect,
+        REQUEST_USER_POSITION_N,
+        DEFINITION_POSITION,
+        SIMCONNECT_OBJECT_ID_USER,
+        SIMCONNECT_PERIOD_ONCE,
+        0, 0, 0, 0
+    );
+
+    if (SUCCEEDED(hr)) {
+        std::cout << "Spawn-Anfrage fuer kleines Flugzeug gesendet." << std::endl;
+    }
+    else {
+        std::cerr << "Fehler beim Senden der Spawn-Anfrage fuer kleines Flugzeug." << std::endl;
+    }
+}
+
+void LinksNachRechts() {
+    HRESULT hr = SimConnect_RequestDataOnSimObject(
+        hSimConnect,
+        REQUEST_USER_POSITION_C,
+        DEFINITION_POSITION,
+        SIMCONNECT_OBJECT_ID_USER,
+        SIMCONNECT_PERIOD_ONCE,
+        0, 0, 0, 0
+    );
+
+    if (SUCCEEDED(hr)) {
+        std::cout << "Spawn-Anfrage fuer zufällige Richtung (C) gesendet." << std::endl;
+    }
+    else {
+        std::cerr << "Fehler beim Senden der Spawn-Anfrage (C)." << std::endl;
+    }
+}
+
+void CALLBACK MyDispatchProc(SIMCONNECT_RECV* pData, DWORD cbData, void* pContext) {
+    switch (pData->dwID) {
+    case SIMCONNECT_RECV_ID_SIMOBJECT_DATA: {
+        SIMCONNECT_RECV_SIMOBJECT_DATA* pObjData = (SIMCONNECT_RECV_SIMOBJECT_DATA*)pData;
+
+        if (pObjData->dwRequestID == REQUEST_PERIODIC_POSITION) {
+            // Aktuelle Spielerposition
+            AircraftPosition* userPos = (AircraftPosition*)&pObjData->dwData;
+            g_UserHeading = userPos->heading;
+
+            std::cout << "[Player Position] Lat: " << userPos->latitude
+                << ", Lon: " << userPos->longitude
+                << ", Alt: " << userPos->altitude << " ft"
+                << ", Heading: " << userPos->heading << "°" << std::endl;
+
+        }
+        else if (pObjData->dwRequestID == REQUEST_UPDATE_AI_FLIGHT) {
+        
+            double desiredHeading = g_initialAIHeading;
+            double desiredAirspeed = 120; 
+
+            for (auto aiObjectID : aiObjectIDs) {
+                AircraftControl control;
+                control.heading = desiredHeading;
+                control.airspeed = desiredAirspeed;
+
+                HRESULT hrSet = SimConnect_SetDataOnSimObject(
+                    hSimConnect,
+                    DEFINITION_CONTROL,
+                    aiObjectID,
+                    SIMCONNECT_DATA_SET_FLAG_DEFAULT,
+                    0,
+                    sizeof(AircraftControl),
+                    &control
+                );
+
+                if (FAILED(hrSet)) {
+                    std::cerr << "Fehler beim Setzen der Flugsteuerungsdaten." << std::endl;
+                }
+            }
+
+        }
+        else if (pObjData->dwRequestID == REQUEST_USER_POSITION_B) {
+
+            AircraftPosition* userPos = (AircraftPosition*)&pObjData->dwData;
+            double headingRad = (userPos->heading * M_PI) / 180.0;
+            double offsetDistance = 0.009;
+            double spawnLat = userPos->latitude + (offsetDistance * cos(headingRad));
+            double spawnLon = userPos->longitude + (offsetDistance * sin(headingRad));
+
+            SIMCONNECT_DATA_INITPOSITION InitPos747;
+            InitPos747.Latitude = spawnLat;
+            InitPos747.Longitude = spawnLon;
+            InitPos747.Altitude = userPos->altitude + 1;
+            InitPos747.Pitch = 0.0;
+            InitPos747.Bank = 0.0;
+            InitPos747.Heading = userPos->heading - 100;
+            InitPos747.OnGround = 0;
+            InitPos747.Airspeed = 150;
+
+            HRESULT hr = SimConnect_AICreateNonATCAircraft(
+                hSimConnect,
+                "747-8F",
+                "AI747",
+                InitPos747,
+                0
+            );
+
+            if (SUCCEEDED(hr)) {
+                spawnCount747++;
+                std::cout << "AI-Flugzeug (747-8F) erstellt! Gesamt: " << spawnCount747.load() << std::endl;
+            }
+            else {
+                std::cerr << "Fehler beim Erstellen der 747." << std::endl;
+            }
+
+        }
+        else if (pObjData->dwRequestID == REQUEST_USER_POSITION_N) {
+
+            AircraftPosition* userPos = (AircraftPosition*)&pObjData->dwData;
+            const double EarthRadius = 6371000.0;
+            double latRad = userPos->latitude * M_PI / 180.0;
+            double headingRad = userPos->heading * M_PI / 180.0;
+            double offsetDistance = 600.0;
+
+            double spawnLat = userPos->latitude + (offsetDistance * cos(headingRad)) / EarthRadius * (180.0 / M_PI);
+            double spawnLon = userPos->longitude + (offsetDistance * sin(headingRad)) / (EarthRadius * cos(latRad)) * (180.0 / M_PI);
+
+            SIMCONNECT_DATA_INITPOSITION InitPosICON;
+            InitPosICON.Latitude = spawnLat;
+            InitPosICON.Longitude = spawnLon;
+            InitPosICON.Altitude = userPos->altitude + 1;
+            InitPosICON.Pitch = 0.0;
+            InitPosICON.Bank = 0.0;
+            InitPosICON.Heading = userPos->heading;
+            InitPosICON.OnGround = 0;
+            InitPosICON.Airspeed = 120;
+
+            HRESULT hr = SimConnect_AICreateNonATCAircraft(
+                hSimConnect,
+                "Icon A5",
+                "AIICON",
+                InitPosICON,
+                0
+            );
+
+            if (SUCCEEDED(hr)) {
+                spawnCountSmall++;
+                std::cout << "AI-Flugzeug (Icon A5) erstellt! Gesamt: " << spawnCountSmall.load() << std::endl;
+            }
+            else {
+                std::cerr << "Fehler beim Erstellen des Icon A5." << std::endl;
+            }
+
+        }
+
+
+
+        // Das hier ist Text 3 - 
+
+
+
+
+        else if (pObjData->dwRequestID == REQUEST_USER_POSITION_C) {
+           
+            AircraftPosition* userPos = (AircraftPosition*)&pObjData->dwData;
+            const double EarthRadius = 6371000.0;
+            double latRad = userPos->latitude * M_PI / 180.0;
+            double headingRad = userPos->heading * M_PI / 180.0;
+
+
+            int randAngle = (rand() % 181) - 90;
+            double angleOffsetDegrees = static_cast<double>(randAngle);
+            double angleOffsetRad = angleOffsetDegrees * M_PI / 180.0;
+
+
+            double spawnDistance = 1000;  // *** Hier ist die Entfernung - Probier das mit 1 Meter aus um zu schauen ob uberhaupt etwas Spawnt.
+
+
+            double spawnLat = userPos->latitude + (spawnDistance * cos(headingRad + angleOffsetRad)) / EarthRadius * (180.0 / M_PI);
+            double spawnLon = userPos->longitude + (spawnDistance * sin(headingRad + angleOffsetRad)) / (EarthRadius * cos(latRad)) * (180.0 / M_PI);
+
+
+            double aiHeading;
+            if (angleOffsetDegrees < 0.0) {
+
+                aiHeading = userPos->heading + 45.0;
+            }
+            else if (angleOffsetDegrees > 0.0) {
+
+                aiHeading = userPos->heading - 45.0;
+            }
+            else {
+
+                aiHeading = userPos->heading;
+            }
+
+
+            aiHeading = fmod(aiHeading, 360.0);
+            if (aiHeading < 0.0) {
+                aiHeading += 360.0;
+            }
+
+
+            SIMCONNECT_DATA_INITPOSITION InitPosAI;
+            InitPosAI.Latitude = spawnLat;
+            InitPosAI.Longitude = spawnLon;
+            InitPosAI.Altitude = userPos->altitude;
+            InitPosAI.Pitch = 0.0;
+            InitPosAI.Bank = 0.0;
+            InitPosAI.Heading = aiHeading;
+            InitPosAI.OnGround = 0;
+            InitPosAI.Airspeed = 150;
+
+
+            HRESULT hr = SimConnect_AICreateNonATCAircraft(
+                hSimConnect,
+                "Icon A5",
+                "AIICON",
+                InitPosAI,
+                0
+            );
+
+            if (SUCCEEDED(hr)) {
+                spawnCountSmall++;
+                std::cout << "AI-Flugzeug (Icon A5) erstellt! Gesamt: " << spawnCountSmall.load() << std::endl;
+                std::cout << "Zufallswinkel: " << angleOffsetDegrees << "°, AI-Heading: " << aiHeading << "°" << std::endl;
+
+
+                g_initialAIHeading = aiHeading;
+            }
+            else {
+                std::cerr << "Fehler beim Erstellen des AI-Flugzeugs (C)." << std::endl;
+            }
+        }
+
+
+        else if (pObjData->dwRequestID == REQUEST_AI_POSITION) {
+            AircraftPosition* aiPos = (AircraftPosition*)&pObjData->dwData;
+            std::cout << "[AI-Position] ObjectID: " << pObjData->dwObjectID
+                << " Lat: " << aiPos->latitude
+                << ", Lon: " << aiPos->longitude
+                << ", Alt: " << aiPos->altitude << " ft"
+                << ", Heading: " << aiPos->heading << "°" << std::endl;
+        }
+
+        break;
+    }
+    case SIMCONNECT_RECV_ID_ASSIGNED_OBJECT_ID: {
+        SIMCONNECT_RECV_ASSIGNED_OBJECT_ID* pAssigned = (SIMCONNECT_RECV_ASSIGNED_OBJECT_ID*)pData;
+        std::cout << "AI-Flugzeug ID zugewiesen: " << pAssigned->dwObjectID << std::endl;
+        aiObjectIDs.push_back(pAssigned->dwObjectID);
+
+        HRESULT hrAI = SimConnect_RequestDataOnSimObject(
+            hSimConnect,
+            REQUEST_AI_POSITION,
+            DEFINITION_AI_POSITION,
+            pAssigned->dwObjectID,
+            SIMCONNECT_PERIOD_SECOND,
+            0,
+            3,
+            0, 0
+        );
+
+        if (FAILED(hrAI)) {
+            std::cerr << "Fehler beim Anfordern der AI-Positionsdaten." << std::endl;
+        }
+
+        break;
+    }
+    case SIMCONNECT_RECV_ID_QUIT: {
+        std::cout << "SimConnect beendet." << std::endl;
+        SimConnect_Close(hSimConnect);
+        exit(0);
+    }
+    default:
+        break;
+    }
+}
+
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_HOTKEY:
+        if (wParam == 1) {
+            RequestSpawn747();
+        }
+        else if (wParam == 2) {
+            RequestSpawnSmall();
+        }
+        else if (wParam == 3) {
+            LinksNachRechts();
+        }
+        break;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    default:
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    }
+    return 0;
+}
+
+int main() {
+    srand((unsigned int)time(NULL));
+
+    const wchar_t CLASS_NAME[] = L"SimConnectHotkeyWindow";
+
+    WNDCLASS wc = { };
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = CLASS_NAME;
+
+    if (!RegisterClass(&wc)) {
+        std::cerr << "Fensterklasse konnte nicht registriert werden. Fehler: " << GetLastError() << std::endl;
+        return 1;
+    }
+
+    HWND hwnd = CreateWindowEx(
+        0, CLASS_NAME, L"SimConnectHotkeyWindow", 0,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        NULL, NULL, GetModuleHandle(NULL), NULL
+    );
+
+    if (!hwnd) {
+        std::cerr << "Fenster konnte nicht erstellt werden. Fehler: " << GetLastError() << std::endl;
+        return 1;
+    }
+
+    // Hotkeys: ALT+7, ALT+2, ALT+1
+    if (!RegisterHotKey(hwnd, 1, MOD_ALT, 0x37)) {
+        std::cerr << "Hotkey 'ALT+7' konnte nicht registriert werden." << std::endl;
+        return 1;
+    }
+    if (!RegisterHotKey(hwnd, 2, MOD_ALT, 0x32)) {
+        std::cerr << "Hotkey 'ALT+2' konnte nicht registriert werden." << std::endl;
+        return 1;
+    }
+    if (!RegisterHotKey(hwnd, 3, MOD_ALT, 0x31)) {
+        std::cerr << "Hotkey 'ALT+1' konnte nicht registriert werden." << std::endl;
+        return 1;
+    }
+
+    HRESULT hr = SimConnect_Open(&hSimConnect, "AI Aircraft Spawner", hwnd, WM_USER, 0, 0);
+    if (FAILED(hr)) {
+        std::cerr << "Verbindung zu SimConnect konnte nicht hergestellt werden. HRESULT: " << hr << std::endl;
+        return 1;
+    }
+
+    // Data Definitions
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_POSITION, "PLANE LATITUDE", "degrees");
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_POSITION, "PLANE LONGITUDE", "degrees");
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_POSITION, "PLANE ALTITUDE", "feet");
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_POSITION, "PLANE HEADING DEGREES TRUE", "degrees");
+
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_CONTROL, "PLANE HEADING DEGREES TRUE", "degrees");
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_CONTROL, "AIRSPEED INDICATED", "knots");
+
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_AI_POSITION, "PLANE LATITUDE", "degrees");
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_AI_POSITION, "PLANE LONGITUDE", "degrees");
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_AI_POSITION, "PLANE ALTITUDE", "feet");
+    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_AI_POSITION, "PLANE HEADING DEGREES TRUE", "degrees");
+
+    hr = SimConnect_RequestDataOnSimObject(
+        hSimConnect,
+        REQUEST_PERIODIC_POSITION,
+        DEFINITION_POSITION,
+        SIMCONNECT_OBJECT_ID_USER,
+        SIMCONNECT_PERIOD_SECOND,
+        0, 3, 0, 0
+    );
+
+  
+    hr = SimConnect_RequestDataOnSimObject(
+        hSimConnect,
+        REQUEST_UPDATE_AI_FLIGHT,
+        DEFINITION_CONTROL,
+        SIMCONNECT_OBJECT_ID_USER,
+        SIMCONNECT_PERIOD_SECOND,
+        0, 1, 0, 0
+    );
+
+    MSG msg = { };
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+        SimConnect_CallDispatch(hSimConnect, MyDispatchProc, NULL);
+    }
+
+    UnregisterHotKey(hwnd, 1);
+    UnregisterHotKey(hwnd, 2);
+    UnregisterHotKey(hwnd, 3);
+    SimConnect_Close(hSimConnect);
+
+    return 0;
+}
