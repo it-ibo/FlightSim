@@ -4,8 +4,8 @@
 #include <iostream>
 #include <atomic>
 #include <vector>
-#include <unordered_map>
 #include <cmath>
+#include <map>
 
 #ifndef M_PI
 #define _USE_MATH_DEFINES
@@ -13,8 +13,7 @@
 #endif
 
 enum DataRequests {
-    REQUEST_USER_POSITION_B = 1000,
-    REQUEST_USER_POSITION_N,
+    REQUEST_USER_POSITION_C = 1000,
     REQUEST_PERIODIC_POSITION,
     REQUEST_UPDATE_AI_FLIGHT,
     REQUEST_AI_POSITION
@@ -36,26 +35,41 @@ struct AircraftPosition {
 struct AircraftControl {
     double heading;
     double airspeed;
-    double pitch;
-    double altitude;
 };
 
+// Globale Variablen
 HANDLE hSimConnect = nullptr;
 std::atomic<int> spawnCount747(0);
 std::atomic<int> spawnCountSmall(0);
 std::vector<DWORD> aiObjectIDs;
-
-
-std::unordered_map<DWORD, double> aiInitialAltitude;
-
 double g_UserHeading = 0.0;
-double haltehohe = 0.0; 
+AircraftPosition g_UserPosition = { 0.0, 0.0, 0.0, 0.0 }; // Globale Spielerposition
 
+// Funktion zur Berechnung der Distanz in Metern zwischen zwei Längen- und Breitengraden
+double CalculateDistanceMeters(double lat1, double lon1, double lat2, double lon2) {
+    const double EarthRadius = 6371000.0; // Erdradius in Metern
 
-void RequestSpawnSmall() {
+    double latRad1 = lat1 * M_PI / 180.0;
+    double lonRad1 = lon1 * M_PI / 180.0;
+    double latRad2 = lat2 * M_PI / 180.0;
+    double lonRad2 = lon2 * M_PI / 180.0;
+
+    double dLat = latRad2 - latRad1;
+    double dLon = lonRad2 - lonRad1;
+
+    double a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(latRad1) * cos(latRad2) *
+        sin(dLon / 2) * sin(dLon / 2);
+
+    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    double distance = EarthRadius * c;
+    return distance;
+}
+
+void LinksNachRechts() {
     HRESULT hr = SimConnect_RequestDataOnSimObject(
         hSimConnect,
-        REQUEST_USER_POSITION_N,
+        REQUEST_USER_POSITION_C,
         DEFINITION_POSITION,
         SIMCONNECT_OBJECT_ID_USER,
         SIMCONNECT_PERIOD_ONCE,
@@ -63,7 +77,7 @@ void RequestSpawnSmall() {
     );
 
     if (SUCCEEDED(hr)) {
-        std::cout << "Spawn-Anfrage für kleines Flugzeug gesendet. Request ID: " << REQUEST_USER_POSITION_N << std::endl;
+        std::cout << "Spawn-Anfrage für kleines Flugzeug gesendet. Request ID: " << REQUEST_USER_POSITION_C << std::endl;
     }
     else {
         std::cerr << "Fehler beim Senden der Spawn-Anfrage für kleines Flugzeug. HRESULT: " << hr << std::endl;
@@ -78,29 +92,24 @@ void CALLBACK MyDispatchProc(SIMCONNECT_RECV* pData, DWORD cbData, void* pContex
 
         if (pObjData->dwRequestID == REQUEST_PERIODIC_POSITION) {
             AircraftPosition* userPos = (AircraftPosition*)&pObjData->dwData;
-            std::cout << "[Player Position] Lat: " << userPos->latitude
-                << ", Lon: " << userPos->longitude
-                << ", Alt: " << userPos->altitude << " ft"
+            std::cout << "[Player Position] Breitengrad: " << userPos->latitude
+                << ", Langengrad: " << userPos->longitude
+                << ", Hoehe: " << userPos->altitude << " ft"
                 << ", Heading: " << userPos->heading << "°" << std::endl;
 
             g_UserHeading = userPos->heading;
-            // haltehohe = userPos->altitude; // Wird nicht mehr für KI verwendet, daher optional
+            // Spielerposition speichern
+            g_UserPosition = *userPos;
+
         }
         else if (pObjData->dwRequestID == REQUEST_UPDATE_AI_FLIGHT) {
-            // Hier steuern wir das AI-Flugzeug
-            double desiredHeading = g_UserHeading - 180.0;
-            double desiredAirspeed = 80.0; // Eine realistischere Geschwindigkeit
-            double desiredPitch = 0.0;     // Neutrale Pitch
+            double desiredHeading = g_UserHeading - 90;
+            double desiredAirspeed = 120;
 
-         
             for (auto aiObjectID : aiObjectIDs) {
-                double desiredAltitude = aiInitialAltitude[aiObjectID];
-
                 AircraftControl control;
                 control.heading = desiredHeading;
                 control.airspeed = desiredAirspeed;
-                control.pitch = desiredPitch;
-                control.altitude = desiredAltitude;
 
                 HRESULT hrSet = SimConnect_SetDataOnSimObject(
                     hSimConnect,
@@ -113,47 +122,51 @@ void CALLBACK MyDispatchProc(SIMCONNECT_RECV* pData, DWORD cbData, void* pContex
                 );
 
                 if (FAILED(hrSet)) {
-                    std::cerr << "Fehler beim Setzen der Flugsteuerungsdaten für AI-Flugzeug ID "
-                        << aiObjectID << ". HRESULT: " << hrSet << std::endl;
-                }
-                else {
-                    std::cout << "[AI-Control Update] ID: " << aiObjectID
-                        << " Heading: " << desiredHeading
-                        << " Airspeed: " << desiredAirspeed
-                        << " Pitch: " << desiredPitch
-                        << " Alt: " << desiredAltitude << std::endl;
+                    std::cerr << "Fehler beim Setzen der Flugsteuerungsdaten fuer AI-Flugzeug ID " << aiObjectID << ". HRESULT: " << hrSet << std::endl;
                 }
             }
+
         }
-        else if (pObjData->dwRequestID == REQUEST_USER_POSITION_N) {
-          
+        else if (pObjData->dwRequestID == REQUEST_USER_POSITION_C) {
             AircraftPosition* userPos = (AircraftPosition*)&pObjData->dwData;
 
-            double headingRad = (userPos->heading * M_PI) / 180.0;
             const double EarthRadius = 6371000.0;
-            double offsetDistance = 600.0; // 600 m vor dem Spieler
+            double latRad = userPos->latitude * M_PI / 180.0;
+            double headingRad = userPos->heading * M_PI / 180.0;
 
-            double spawnLat = userPos->latitude + (offsetDistance * cos(headingRad)) / EarthRadius * (180.0 / M_PI);
-            double spawnLon = userPos->longitude + (offsetDistance * sin(headingRad)) /
-                (EarthRadius * cos(userPos->latitude * M_PI / 180.0)) * (180.0 / M_PI);
+            double forwardDistance = 3000; // 3000 m vor dem Spieler
+            double rightDistance = 3000;   // 3000 m rechts vom Spieler
 
-            double spawnAltitude = userPos->altitude + 1.0;
+            double deltaLatForward = (forwardDistance * cos(headingRad)) / EarthRadius * (180.0 / M_PI);
+            double deltaLonForward = (forwardDistance * sin(headingRad)) / (EarthRadius * cos(latRad)) * (180.0 / M_PI);
 
-            SIMCONNECT_DATA_INITPOSITION InitPosICON;
-            InitPosICON.Latitude = spawnLat;
-            InitPosICON.Longitude = spawnLon;
-            InitPosICON.Altitude = spawnAltitude;
-            InitPosICON.Pitch = 0.0;
-            InitPosICON.Bank = 0.0;
-            InitPosICON.Heading = userPos->heading - 180.0;
-            InitPosICON.OnGround = 0;
-            InitPosICON.Airspeed = 80; // Startgeschwindigkeit
+            double headingRightRad = headingRad + M_PI_2;
+            double deltaLatRight = (rightDistance * cos(headingRightRad)) / EarthRadius * (180.0 / M_PI);
+            double deltaLonRight = (rightDistance * sin(headingRightRad)) / (EarthRadius * cos(latRad)) * (180.0 / M_PI);
+
+            double spawnLat = userPos->latitude + deltaLatForward + deltaLatRight;
+            double spawnLon = userPos->longitude + deltaLonForward + deltaLonRight;
+
+            double aiHeading = userPos->heading - 90.0;
+            if (aiHeading < 0.0) {
+                aiHeading += 360.0;
+            }
+
+            SIMCONNECT_DATA_INITPOSITION InitPosAI;
+            InitPosAI.Latitude = spawnLat;
+            InitPosAI.Longitude = spawnLon;
+            InitPosAI.Altitude = userPos->altitude;
+            InitPosAI.Pitch = 0.0;
+            InitPosAI.Bank = 0.0;
+            InitPosAI.Heading = aiHeading;
+            InitPosAI.OnGround = 0;
+            InitPosAI.Airspeed = 150;
 
             HRESULT hr = SimConnect_AICreateNonATCAircraft(
                 hSimConnect,
-                "Icon A5",
+                "Icon A5", // Flugzeugmodell
                 "AIICON",
-                InitPosICON,
+                InitPosAI,
                 0
             );
 
@@ -164,14 +177,20 @@ void CALLBACK MyDispatchProc(SIMCONNECT_RECV* pData, DWORD cbData, void* pContex
             else {
                 std::cerr << "Fehler beim Erstellen des AI-Flugzeugs (Icon A5). HRESULT: " << hr << std::endl;
             }
+
         }
         else if (pObjData->dwRequestID == REQUEST_AI_POSITION) {
+            // Periodische Anfrage für AI-Flugzeug-Positionen
             AircraftPosition* aiPos = (AircraftPosition*)&pObjData->dwData;
             std::cout << "[AI-Position] ObjectID: " << pObjData->dwObjectID
-                << " Lat: " << aiPos->latitude
-                << ", Lon: " << aiPos->longitude
-                << ", Alt: " << aiPos->altitude << " ft"
+                << " Breitengrad: " << aiPos->latitude
+                << ", Langengrad: " << aiPos->longitude
+                << ", Hoehe: " << aiPos->altitude << " ft"
                 << ", Heading: " << aiPos->heading << "°" << std::endl;
+
+            // Distanz zwischen Spieler und AI berechnen
+            double distance = CalculateDistanceMeters(g_UserPosition.latitude, g_UserPosition.longitude, aiPos->latitude, aiPos->longitude);
+            std::cout << "Entfernung zwischen Spieler und AI: " << distance << " Meter" << std::endl;
         }
 
         break;
@@ -181,25 +200,21 @@ void CALLBACK MyDispatchProc(SIMCONNECT_RECV* pData, DWORD cbData, void* pContex
         std::cout << "AI-Flugzeug ID zugewiesen: " << pAssigned->dwObjectID << std::endl;
         aiObjectIDs.push_back(pAssigned->dwObjectID);
 
-        // Hier können wir nun die aktuelle Altitude des neu erstellten Flugzeugs speichern
-        // Dafür fordern wir zunächst einmalig seine Position an, um die Altitude zu erfahren.
         HRESULT hrAI = SimConnect_RequestDataOnSimObject(
             hSimConnect,
             REQUEST_AI_POSITION,
             DEFINITION_AI_POSITION,
             pAssigned->dwObjectID,
-            SIMCONNECT_PERIOD_ONCE,
-            0, 0, 0, 0
+            SIMCONNECT_PERIOD_SECOND,
+            0,
+            3,
+            0, 0
         );
 
         if (FAILED(hrAI)) {
-            std::cerr << "Fehler beim Anfordern der einmaligen AI-Positionsdaten. HRESULT: " << hrAI << std::endl;
+            std::cerr << "Fehler beim Anfordern der AI-Positionsdaten. HRESULT: " << hrAI << std::endl;
         }
 
-        break;
-    }
-    case SIMCONNECT_RECV_ID_SIMOBJECT_DATA_BYTYPE: {
-        // Wird hier nicht verwendet
         break;
     }
     case SIMCONNECT_RECV_ID_QUIT: {
@@ -208,36 +223,7 @@ void CALLBACK MyDispatchProc(SIMCONNECT_RECV* pData, DWORD cbData, void* pContex
         exit(0);
     }
     default:
-        // Prüfen, ob eventuell eine AI-Position geupdatet wurde, nachdem wir diese einmalig abgerufen haben
         break;
-    }
-
- 
-    if (pData->dwID == SIMCONNECT_RECV_ID_SIMOBJECT_DATA) {
-        SIMCONNECT_RECV_SIMOBJECT_DATA* pObjData = (SIMCONNECT_RECV_SIMOBJECT_DATA*)pData;
-        if (pObjData->dwRequestID == REQUEST_AI_POSITION && pObjData->dwObjectID != SIMCONNECT_OBJECT_ID_USER) {
-            AircraftPosition* aiPos = (AircraftPosition*)&pObjData->dwData;
-
-            // Falls die AI-Altitude noch nicht gespeichert ist
-            if (aiInitialAltitude.find(pObjData->dwObjectID) == aiInitialAltitude.end()) {
-                aiInitialAltitude[pObjData->dwObjectID] = aiPos->altitude;
-                std::cout << "Initiale Höhe für AI-Flugzeug " << pObjData->dwObjectID << ": " << aiPos->altitude << " ft" << std::endl;
-
-                // Jetzt die Daten für dieses Objekt periodisch anfordern, um Position zu tracken
-                HRESULT hrAI = SimConnect_RequestDataOnSimObject(
-                    hSimConnect,
-                    REQUEST_AI_POSITION,
-                    DEFINITION_AI_POSITION,
-                    pObjData->dwObjectID,
-                    SIMCONNECT_PERIOD_SECOND,
-                    0, 3, 0, 0
-                );
-
-                if (FAILED(hrAI)) {
-                    std::cerr << "Fehler beim regelmäßigen Anfordern der AI-Positionsdaten. HRESULT: " << hrAI << std::endl;
-                }
-            }
-        }
     }
 }
 
@@ -245,10 +231,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     switch (uMsg) {
     case WM_HOTKEY:
         if (wParam == 1) {
-            RequestSpawnSmall();
+            LinksNachRechts();
         }
         else if (wParam == 2) {
-            RequestSpawnSmall();
+            LinksNachRechts();
+        }
+        else if (wParam == 3) {
+            LinksNachRechts();
         }
         break;
     case WM_DESTROY:
@@ -284,14 +273,18 @@ int main() {
         return 1;
     }
 
-    // Hotkeys registrieren (ALT+7, ALT+1)
-    if (!RegisterHotKey(hwnd, 1, MOD_ALT, 0x37)) {
-        std::cerr << "Hotkey 'ALT+7' konnte nicht registriert werden. Fehler: " << GetLastError() << std::endl;
+    if (!RegisterHotKey(hwnd, 1, MOD_ALT, 0x37)) { // Alt+7
+        std::cerr << "Hotkey 'b' konnte nicht registriert werden. Fehler: " << GetLastError() << std::endl;
         return 1;
     }
 
-    if (!RegisterHotKey(hwnd, 2, MOD_ALT, 0x31)) {
-        std::cerr << "Hotkey 'ALT+1' konnte nicht registriert werden. Fehler: " << GetLastError() << std::endl;
+    if (!RegisterHotKey(hwnd, 3, MOD_ALT, 0x31)) { // Alt+1
+        std::cerr << "Hotkey 'n' konnte nicht registriert werden. Fehler: " << GetLastError() << std::endl;
+        return 1;
+    }
+
+    if (!RegisterHotKey(hwnd, 2, MOD_ALT, 0x32)) { // Alt+2
+        std::cerr << "Hotkey 'n' konnte nicht registriert werden. Fehler: " << GetLastError() << std::endl;
         return 1;
     }
 
@@ -301,50 +294,40 @@ int main() {
         return 1;
     }
 
-    // Data Definitions
-    // Spielerposition
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_POSITION, "PLANE LATITUDE", "degrees");
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_POSITION, "PLANE LONGITUDE", "degrees");
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_POSITION, "PLANE ALTITUDE", "feet");
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_POSITION, "PLANE HEADING DEGREES TRUE", "degrees");
 
-    // AI Kontrolle (Heading, Airspeed, Pitch, Altitude)
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_CONTROL, "PLANE HEADING DEGREES TRUE", "degrees");
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_CONTROL, "AIRSPEED INDICATED", "knots");
-    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_CONTROL, "PLANE PITCH DEGREES", "degrees");
-    hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_CONTROL, "PLANE ALTITUDE", "feet");
 
-    // AI Positionsdaten
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_AI_POSITION, "PLANE LATITUDE", "degrees");
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_AI_POSITION, "PLANE LONGITUDE", "degrees");
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_AI_POSITION, "PLANE ALTITUDE", "feet");
     hr = SimConnect_AddToDataDefinition(hSimConnect, DEFINITION_AI_POSITION, "PLANE HEADING DEGREES TRUE", "degrees");
 
-    // Regelmäßige Anfragen für die Spielerposition
     hr = SimConnect_RequestDataOnSimObject(
         hSimConnect,
         REQUEST_PERIODIC_POSITION,
         DEFINITION_POSITION,
         SIMCONNECT_OBJECT_ID_USER,
         SIMCONNECT_PERIOD_SECOND,
-        0, 3, 0, 0
+        0,
+        3,
+        0, 0
     );
-    if (FAILED(hr)) {
-        std::cerr << "Fehler bei REQUEST_PERIODIC_POSITION. HRESULT: " << hr << std::endl;
-    }
 
-    // Regelmäßige Anfragen zur Aktualisierung der AI-Flugdaten
     hr = SimConnect_RequestDataOnSimObject(
         hSimConnect,
         REQUEST_UPDATE_AI_FLIGHT,
         DEFINITION_CONTROL,
         SIMCONNECT_OBJECT_ID_USER,
         SIMCONNECT_PERIOD_SECOND,
-        0, 1, 0, 0
+        0,
+        1,
+        0, 0
     );
-    if (FAILED(hr)) {
-        std::cerr << "Fehler bei REQUEST_UPDATE_AI_FLIGHT. HRESULT: " << hr << std::endl;
-    }
 
     MSG msg = { };
     while (GetMessage(&msg, NULL, 0, 0)) {
